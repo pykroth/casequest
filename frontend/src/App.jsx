@@ -3,6 +3,7 @@ import { useState, useEffect } from 'react'
 import { supabase } from './config/supabaseClient'
 import Home from './Pages/Home/Home'
 import Auth from './Pages/Login/Login'
+import Calendar from './Pages/Calendar/Calendar'
 import './index.css'
 
 function App() {
@@ -23,8 +24,9 @@ function App() {
   return (
     <BrowserRouter>
       <Routes>
-        <Route path="/" element={user ? <Navigate to="/auth" replace /> : <Home />} />
-        <Route path="/auth" element={<Auth />} />
+        <Route path="/" element={<Home />} />
+        <Route path="/auth" element={user ? <Navigate to="/calendar" replace /> : <Auth />} />
+        <Route path="/calendar" element={user ? <Calendar /> : <Navigate to="/auth" replace />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </BrowserRouter>

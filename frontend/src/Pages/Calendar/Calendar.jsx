@@ -56,14 +56,65 @@ export default function CalendarPage() {
     
     // Check if it's JSON data
     try {
-      const jsonData = JSON.parse(text)
+      // First, strip any markdown code block syntax
+      let cleanText = text.trim()
+      if (cleanText.startsWith('```json')) {
+        cleanText = cleanText.replace(/^```json\n/, '').replace(/\n```$/, '')
+      } else if (cleanText.startsWith('```')) {
+        cleanText = cleanText.replace(/^```\n/, '').replace(/\n```$/, '')
+      }
+      
+      let jsonData = JSON.parse(cleanText)
+      
+      // Special handling for malformed nested structure from n8n
+      // The response has nested objects with the actual data buried inside
+      if (jsonData.output) {
+        try {
+          // Try to parse the output field if it's a string
+          let outputText = jsonData.output
+          // Strip markdown from output field too
+          if (outputText.startsWith('```json')) {
+            outputText = outputText.replace(/^```json\n/, '').replace(/\n```$/, '')
+          } else if (outputText.startsWith('```')) {
+            outputText = outputText.replace(/^```\n/, '').replace(/\n```$/, '')
+          }
+          jsonData = JSON.parse(outputText)
+        } catch (e) {
+          console.log('Output field is not JSON string')
+        }
+      }
+      
+      // Handle new n8n/Gemini format with tasks array directly
+      if (jsonData.tasks && Array.isArray(jsonData.tasks)) {
+        jsonData.tasks.forEach(task => {
+          if (task.due_date) {
+            // Map type names to our format
+            let type = 'assignment'
+            const taskType = task.type.toLowerCase()
+            if (taskType === 'quiz') type = 'quiz'
+            else if (taskType === 'project') type = 'project'
+            else if (taskType === 'homework') type = 'assignment'
+            else if (taskType === 'exam' || taskType === 'test') type = 'exam'
+            
+            deadlines.push({
+              title: task.title,
+              date: task.due_date, // Already in YYYY-MM-DD format
+              type: type,
+              course: jsonData.course_name || ''
+            })
+          }
+        })
+        
+        console.log('Final deadlines found:', deadlines)
+        return deadlines
+      }
+      
+      // Handle old format with tasks and weekly_topics
       if (jsonData.tasks && jsonData.weekly_topics) {
-        // Parse syllabus JSON format
         jsonData.tasks.forEach(task => {
           if (task.week_number && jsonData.weekly_topics) {
             const weekInfo = jsonData.weekly_topics.find(w => w.week === task.week_number)
             if (weekInfo && weekInfo.dates) {
-              // Extract last date from "Mon, Oct 6; Wed, Oct 8" format
               const dateMatch = weekInfo.dates.match(/([A-Za-z]+)\s+(\d+)(?!.*\d)/)
               if (dateMatch) {
                 const month = {
@@ -93,6 +144,7 @@ export default function CalendarPage() {
       }
     } catch (e) {
       // Not JSON, continue with regex parsing
+      console.log('Not valid JSON, trying regex parsing:', e)
     }
     
     // Month names mapping
@@ -220,45 +272,95 @@ export default function CalendarPage() {
     setLoading(true)
 
     try {
-      let text = ''
-      
       if (file.type === 'application/pdf') {
         setMessages(prev => [...prev, {
           role: 'assistant',
-          content: '⚠️ PDF parsing requires backend processing. For now, try copying and pasting the syllabus text or describing the deadlines to me!'
+          content: '🔄 Processing PDF with AI...'
         }])
-        setLoading(false)
-        return
+
+        // Send PDF as FormData (matching Postman)
+        const formData = new FormData()
+        formData.append('data', file)
+
+        const response = await fetch('https://rsunil.app.n8n.cloud/webhook-test/5084e2cf-f705-49d4-89b6-06c26d702bea', {
+          method: 'POST',
+          body: formData
+        })
+
+        console.log('Response status:', response.status)
+        
+        if (!response.ok) {
+          const errorText = await response.text()
+          console.error('n8n error response:', errorText)
+          throw new Error(`n8n returned ${response.status}: ${errorText}`)
+        }
+
+        const responseText = await response.text()
+        console.log('n8n raw response:', responseText)
+
+        let data
+        try {
+          data = JSON.parse(responseText)
+        } catch (e) {
+          console.error('Failed to parse JSON:', responseText)
+          throw new Error('n8n did not return valid JSON. Response: ' + responseText.substring(0, 200))
+        }
+        
+        console.log('n8n parsed response:', data)
+
+        // If there's an output field with nested JSON string, parse it
+        let extractedData = data
+        if (data.output && typeof data.output === 'string') {
+          try {
+            extractedData = JSON.parse(data.output)
+            console.log('Extracted data from output field:', extractedData)
+          } catch (e) {
+            console.log('Output field is not valid JSON')
+          }
+        }
+
+        // Parse the response and extract deadlines
+        const deadlines = parseTextForDeadlines(JSON.stringify(extractedData))
+        
+        if (deadlines.length > 0) {
+          setEvents(prev => [...prev, ...deadlines])
+          setMessages(prev => [...prev.slice(0, -1), {
+            role: 'assistant',
+            content: `✅ Found ${deadlines.length} deadline${deadlines.length > 1 ? 's' : ''} in your PDF!\n\n${deadlines.map(d => `• ${d.title} - ${new Date(d.date).toLocaleDateString()}`).join('\n')}\n\nAll added to your calendar!`
+          }])
+        } else {
+          setMessages(prev => [...prev.slice(0, -1), {
+            role: 'assistant',
+            content: '❌ Could not extract deadlines from the PDF. The response was:\n\n' + JSON.stringify(extractedData, null, 2)
+          }])
+        }
       } else if (file.type.startsWith('image/')) {
         setMessages(prev => [...prev, {
           role: 'assistant',
           content: '⚠️ Image OCR requires backend processing. For now, try typing out the deadlines or pasting the text!'
         }])
-        setLoading(false)
-        return
       } else {
         // Text file
-        text = await file.text()
-      }
-
-      const deadlines = parseTextForDeadlines(text)
-      
-      if (deadlines.length > 0) {
-        setEvents(prev => [...prev, ...deadlines])
-        setMessages(prev => [...prev, {
-          role: 'assistant',
-          content: `✅ Found ${deadlines.length} deadline${deadlines.length > 1 ? 's' : ''}!\n\n${deadlines.map(d => `• ${d.title} - ${new Date(d.date).toLocaleDateString()}`).join('\n')}\n\nAll added to your calendar!`
-        }])
-      } else {
-        setMessages(prev => [...prev, {
-          role: 'assistant',
-          content: '❌ No deadlines found in that file. Try describing them to me instead!'
-        }])
+        const text = await file.text()
+        const deadlines = parseTextForDeadlines(text)
+        
+        if (deadlines.length > 0) {
+          setEvents(prev => [...prev, ...deadlines])
+          setMessages(prev => [...prev, {
+            role: 'assistant',
+            content: `✅ Found ${deadlines.length} deadline${deadlines.length > 1 ? 's' : ''}!\n\n${deadlines.map(d => `• ${d.title} - ${new Date(d.date).toLocaleDateString()}`).join('\n')}\n\nAll added to your calendar!`
+          }])
+        } else {
+          setMessages(prev => [...prev, {
+            role: 'assistant',
+            content: '❌ No deadlines found in that file. Try describing them to me instead!'
+          }])
+        }
       }
     } catch (error) {
-      setMessages(prev => [...prev, {
+      setMessages(prev => [...prev.filter(m => !m.content.includes('Processing PDF')), {
         role: 'assistant',
-        content: '❌ Error processing file. Please try again or describe the deadlines to me.'
+        content: '❌ Error processing file: ' + error.message + '. Please try again.'
       }])
       console.error('File processing error:', error)
     } finally {
@@ -392,7 +494,7 @@ export default function CalendarPage() {
                 <Sparkles className="w-5 h-5 text-blue-600" />
                 AI Assistant
               </h2>
-              <p className="text-sm text-gray-600 mt-1">Describe your assignments or paste syllabus text</p>
+              <p className="text-sm text-gray-600 mt-1">Upload PDFs or describe your assignments</p>
             </div>
 
             <div className="flex-1 overflow-y-auto p-4 space-y-4">
@@ -437,10 +539,10 @@ export default function CalendarPage() {
                 />
                 <label
                   htmlFor="file-upload"
-                  className="flex items-center gap-2 px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-all cursor-pointer text-sm"
+                  className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-all cursor-pointer text-sm font-medium"
                 >
                   <Upload className="w-4 h-4" />
-                  Upload
+                  Upload PDF
                 </label>
                 <button className="flex items-center gap-2 px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-all text-sm">
                   <Camera className="w-4 h-4" />
@@ -573,7 +675,7 @@ export default function CalendarPage() {
                   <div>
                     <h3 className="font-semibold text-gray-900 mb-1">No deadlines yet</h3>
                     <p className="text-sm text-gray-600">
-                      Try typing: "Math exam December 15" or "Essay due November 20"
+                      Upload a PDF syllabus or type: "Math exam December 15"
                     </p>
                   </div>
                 </div>
